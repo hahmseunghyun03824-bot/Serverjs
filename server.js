@@ -13,16 +13,70 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const client = new MongoClient(MONGODB_URI);
 const DB_NAME = "surveyDB"; // 데이터베이스 이름 지정
 
-// (미들웨어 및 정적 파일 설정은 그대로 유지)
+// --- 미들웨어 설정 ---
+// CORS 허용 (프론트엔드와 백엔드가 다른 도메인일 때 필수)
 app.use(cors()); 
+// JSON 요청 본문을 파싱하기 위한 설정
 app.use(express.json());
 
-// 헬스 체크용 루트 경로 (GitHub Pages 파일을 제공하지 않음)
+// 헬스 체크용 루트 경로
 app.get('/', (req, res) => {
     res.status(200).send("Survey Backend API is running.");
 });
 
 // --- API 엔드포인트 ---
+
+// 0. 사용자 등록 (Sign Up) API - /register (추가된 엔드포인트)
+app.post('/register', async (req, res) => {
+    const { email, password, firstName, lastName, gender, gradeLevel } = req.body;
+
+    // 필수 필드 확인
+    if (!email || !password || !gender || !gradeLevel) {
+        return res.status(400).json({ error: "Missing required fields (email, password, gender, gradeLevel)." });
+    }
+
+    try {
+        await client.connect();
+        const database = client.db(DB_NAME);
+        const users = database.collection('users'); // 사용자 정보를 저장할 컬렉션
+
+        // 1. 이미 존재하는 이메일 확인 (중복 등록 방지)
+        const existingUser = await users.findOne({ email });
+        if (existingUser) {
+            return res.status(409).json({ error: "Email already registered." });
+        }
+
+        // 2. 데이터 저장 (실제 서비스에서는 보안을 위해 비밀번호를 반드시 해시해야 합니다.)
+        const result = await users.insertOne({
+            email,
+            password, // 경고: 실제 환경에서는 bcrypt 등을 사용하여 비밀번호를 반드시 해시해야 합니다.
+            firstName: firstName || null, // Optional 필드 처리
+            lastName: lastName || null,   // Optional 필드 처리
+            gender,
+            gradeLevel,
+            registrationDate: new Date()
+        });
+        
+        // 프론트엔드 JavaScript가 `userID > 0`인 숫자를 예상하므로 임시 숫자 ID를 반환합니다.
+        // MongoDB의 ObjectId는 숫자가 아니므로, 클라이언트의 로직에 맞추기 위한 처리입니다.
+        const fakeNumericId = Math.floor(Math.random() * 90000000) + 10000000; 
+
+        // 성공 응답: 201 Created
+        res.status(201).json({ 
+            message: "User registered successfully!", 
+            userID: fakeNumericId,
+            mongoId: result.insertedId.toString()
+        });
+
+    } catch (err) {
+        console.error('Error during user registration:', err.message);
+        // 서버 내부 오류 응답: 500 Internal Server Error
+        res.status(500).json({ error: "Server error during registration.", details: err.message });
+    } finally {
+        await client.close(); // 연결 닫기
+    }
+});
+
 
 // 1. 설문조사 응답 제출 API
 app.post('/api/submit', async (req, res) => {
@@ -37,8 +91,6 @@ app.post('/api/submit', async (req, res) => {
         const result = await responses.insertOne({
             ...data,
             timestamp: new Date(),
-            // q1_c는 MongoDB에서 배열 형태로 그대로 저장 가능
-            // finalReadingDuration 키를 그대로 사용
         });
 
         res.status(201).json({ message: "Survey submitted successfully!", id: result.insertedId });
@@ -59,9 +111,7 @@ app.get('/api/results', async (req, res) => {
 
         const results = await responses.find({}).sort({ timestamp: -1 }).toArray();
 
-        // MongoDB에서 가져온 데이터를 클라이언트가 원하는 형태로 가공 (키 이름은 이미 통일됨)
         const processedResults = results.map(row => {
-            // MongoDB의 _id 필드는 제외하고, finalReadingDuration을 포함하도록 반환
             const finalRow = { ...row, id: row._id };
             delete finalRow._id; 
             return finalRow;
@@ -72,7 +122,7 @@ app.get('/api/results', async (req, res) => {
         console.error('Error fetching data:', err.message);
         res.status(500).json({ message: "Server error fetching results." });
     } finally {
-         await client.close();
+        await client.close();
     }
 });
 
